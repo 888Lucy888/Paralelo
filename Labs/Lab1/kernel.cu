@@ -36,8 +36,14 @@ __global__ void print_all_idx()
     int gidy = tidy + offset_y + row_offset_y;
     int gidz = tidz + offset_z + row_offset_z;
 
-    // Global ID
-    int globalid = gidx + gidy + gidz;
+    // Total threads per block
+    int block_size = block_dimx * block_dimy * block_dimz;
+
+    // Calculate global index
+    int globalid = tidx + tidy * block_dimx + tidz * (block_dimx * block_dimy) +
+        (bidx * gridDim.y * gridDim.z * block_size) +
+        (bidy * gridDim.z * block_size) +
+        (bidz * block_size);
 
     // Printing in kernel bad (only to see here)
     printf("[DEVICE] threadIdx.x: %d, blockIdx.x %d, gridDim.x: %d, gidx: %d \n", tidx, bidx, gdimx, gidx);
