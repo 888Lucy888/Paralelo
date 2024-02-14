@@ -16,6 +16,11 @@ __global__ void print_all_idx()
     int bidy = blockIdx.y;
     int bidz = blockIdx.z;
 
+    // Block Dimensions
+    int block_dimx = blockDim.x;
+    int block_dimy = blockDim.y;
+    int block_dimz = blockDim.z;
+
     // Grid Dim
     int gdimx = gridDim.x;
     int gdimy = gridDim.y;
