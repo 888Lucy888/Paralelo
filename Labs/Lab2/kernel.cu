@@ -1,4 +1,3 @@
-﻿
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 
@@ -15,14 +14,53 @@ inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort =
 }
 
 __global__ void vectorAdd(int* a, int* b, int* c, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int idy = blockIdx.y * blockDim.y + threadIdx.y;
-    int idz = blockIdx.z * blockDim.z + threadIdx.z;
 
-    int index = idz * blockDim.x * blockDim.y * gridDim.x * gridDim.y + idy * blockDim.x * gridDim.x + idx;
+    // Thread ID
+    int tidx = threadIdx.x;
+    int tidy = threadIdx.y;
+    int tidz = threadIdx.z;
 
-    if (index < N) {
-        c[index] = a[index] + b[index];
+    // Block ID
+    int bidx = blockIdx.x;
+    int bidy = blockIdx.y;
+    int bidz = blockIdx.z;
+
+    // Block Dimensions
+    int block_dimx = blockDim.x;
+    int block_dimy = blockDim.y;
+    int block_dimz = blockDim.z;
+
+    // Grid Dim
+    int gdimx = gridDim.x;
+    int gdimy = gridDim.y;
+    int gdimz = gridDim.z;
+
+    // Row Offset
+    int row_offset_x = gdimx * blockDim.x * bidx;
+    int row_offset_y = gdimy * blockDim.y * bidy;
+    int row_offset_z = gdimz * blockDim.z * bidz;
+
+    // Block Offset 
+    int offset_x = bidx * blockDim.x;
+    int offset_y = bidy * blockDim.y;
+    int offset_z = bidz * blockDim.z;
+
+    // Grid ID
+    int gidx = tidx + offset_x + row_offset_x;
+    int gidy = tidy + offset_y + row_offset_y;
+    int gidz = tidz + offset_z + row_offset_z;
+
+    // Total threads per block
+    int block_size = block_dimx * block_dimy * block_dimz;
+
+    // Calculate global index
+    int globalid = tidx + tidy * block_dimx + tidz * (block_dimx * block_dimy) +
+        (bidx * gridDim.y * gridDim.z * block_size) +
+        (bidy * gridDim.z * block_size) +
+        (bidz * block_size);
+                                                              
+    if (globalid < N) {
+        c[globalid] = a[globalid] + b[globalid];
     }
 }
 
@@ -30,7 +68,7 @@ int main() {
     const int N = 10000;
     const int dataSize = N * sizeof(int);
 
-    int* a, * b, * c; 
+    int* a, * b, * c;
     int* d_a, * d_b, * d_c;
 
     a = (int*)malloc(dataSize);
@@ -49,15 +87,15 @@ int main() {
     GPUErrorAssertion(cudaMemcpy(d_a, a, dataSize, cudaMemcpyHostToDevice));
     GPUErrorAssertion(cudaMemcpy(d_b, b, dataSize, cudaMemcpyHostToDevice));
 
-    dim3 blockSize(8, 8, 8);
-    dim3 gridSize((N + blockSize.x - 1) / blockSize.x, (N + blockSize.y - 1) / blockSize.y, (N + blockSize.z - 1) / blockSize.z);
+    dim3 blockSize(256);
+    dim3 gridSize((N + blockSize.x - 1) / blockSize.x);
 
-    vectorAdd << <gridSize, blockSize >> > (d_a, d_b, d_c, N);
+    vectorAdd <<<gridSize, blockSize>>>(d_a, d_b, d_c, N);
     GPUErrorAssertion(cudaDeviceSynchronize());
 
     GPUErrorAssertion(cudaMemcpy(c, d_c, dataSize, cudaMemcpyDeviceToHost));
 
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 20; i++) {
         printf("c[%d] = %d\n", i, c[i]);
     }
 
