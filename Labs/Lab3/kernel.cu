@@ -128,9 +128,9 @@ void matrixMultiplication(int* a, int* b, int* c, int m, int n, int p) {
 }
 
 int main() {
-    const int M = 300; // Rows of A
-    const int N = 400; // Cols of A and rows of B
-    const int P = 500; // Cols of B
+    const int M = 210; // Rows of A
+    const int N = 100; // Cols of A and rows of B
+    const int P = 100; // Cols of B
     // Necesarry for multiplication same col A and rows B
 
     int* A = (int*)malloc(M * N * sizeof(int));
