@@ -98,8 +98,19 @@ int main()
     // CPU
     quickSort(data_cpu, 0, n - 1);
 
+    // Start Clock
+    auto start = std::chrono::steady_clock::now();
+
+    // CPU
+    quickSort(data_cpu, 0, n - 1);
+
     // Call kernel
     //quickSort << <gridSize, blockSize >> > (data_gpu, n, sorted_gpu);
+
+    cudaDeviceSynchronize();
+
+    // End Clock
+    auto end = std::chrono::steady_clock::now();
 
     // Copy data from GPU to CPU
     GPUErrorAssertion(cudaMemcpy(data_cpu, data_gpu, n * sizeof(int), cudaMemcpyDeviceToHost));
