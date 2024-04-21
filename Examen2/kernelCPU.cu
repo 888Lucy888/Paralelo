@@ -2,7 +2,15 @@
 #include <vector>
 #include <chrono>
 
-// Function to check if a number is valid in a particular cell
+// Function: isValid
+// Description: Checks if a given number is valid to be placed in a particular cell of the Sudoku board.
+// Parameters:
+// - board: The Sudoku board represented as a 2D vector of characters.
+// - row: The row index of the cell being checked.
+// - col: The column index of the cell being checked.
+// - num: The number to be checked for validity in the cell.
+// Returns:
+// - bool: True if the number is valid in the cell, false otherwise.
 bool isValid(const std::vector<std::vector<char>>& board, int row, int col, char num) {
     // Check row
     for (int i = 0; i < 9; ++i) {
@@ -26,7 +34,12 @@ bool isValid(const std::vector<std::vector<char>>& board, int row, int col, char
     return true;
 }
 
-// Backtracking function to solve the Sudoku puzzle
+// Function: solveSudoku
+// Description: Recursively solves the Sudoku puzzle using backtracking algorithm.
+// Parameters:
+// - board: The Sudoku board represented as a 2D vector of characters.
+// Returns:
+// - bool: True if Sudoku is solved successfully, false if no solution exists.
 bool solveSudoku(std::vector<std::vector<char>>& board) {
     for (int row = 0; row < 9; ++row) {
         for (int col = 0; col < 9; ++col) {
@@ -45,7 +58,10 @@ bool solveSudoku(std::vector<std::vector<char>>& board) {
     return true; // Sudoku solved
 }
 
-// Function to print the Sudoku board
+// Function: printSudoku
+// Description: Prints the Sudoku board to the console.
+// Parameters:
+// - board: The Sudoku board represented as a 2D vector of characters.
 void printSudoku(const std::vector<std::vector<char>>& board) {
     for (const auto& row : board) {
         for (char cell : row) {
@@ -55,6 +71,8 @@ void printSudoku(const std::vector<std::vector<char>>& board) {
     }
 }
 
+// Function: main
+// Description: Entry point of the program. Solves a predefined Sudoku puzzle and prints the solution along with elapsed time.
 int main() {
     // Sudoku board
     const std::vector<std::vector<char>> board = {
