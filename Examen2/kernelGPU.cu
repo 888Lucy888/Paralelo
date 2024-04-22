@@ -3,6 +3,14 @@
 #include <chrono>
 
 #define N 9
+#define GPUErrorAssertion(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+
+inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort = true) {
+    if (code != cudaSuccess) {
+        fprintf(stderr, "GPUassert: %s %s %d\n\n", cudaGetErrorString(code), file, line);
+        if (abort) exit(code);
+    }
+}
 
 // Device function to check if a number is valid in a particular cell
 __device__ bool isValid(char* board, int row, int col, char num) {
@@ -64,6 +72,10 @@ __global__ void solveSudoku(char* board, bool* solutionFound) {
 }
 
 // Host function to print the Sudoku board
+// Function: printSudoku
+// Description: Prints the solved Sudoku board to the console.
+// Parameters:
+// - board: The solved Sudoku board represented as a 2D vector of characters.
 void printSudoku(const std::vector<char>& board) {
     for (int i = 0; i < N; ++i) {
         for (int j = 0; j < N; ++j) {
@@ -90,33 +102,34 @@ int main() {
     char* dev_board;
     bool* dev_solutionFound;
 
-    cudaMalloc((void**)&dev_board, N * N * sizeof(char));
-    cudaMalloc((void**)&dev_solutionFound, sizeof(bool));
+    GPUErrorAssertion(cudaMalloc((void**)&dev_board, N * N * sizeof(char)));
+    GPUErrorAssertion(cudaMalloc((void**)&dev_solutionFound, sizeof(bool)));
 
-    cudaMemcpy(dev_board, board.data(), N * N * sizeof(char), cudaMemcpyHostToDevice);
+    GPUErrorAssertion(cudaMemcpy(dev_board, board.data(), N * N * sizeof(char), cudaMemcpyHostToDevice));
 
     bool solutionFound = false;
 
     auto start = std::chrono::steady_clock::now(); // Start time measurement
 
     solveSudoku<<<1, N * N>>>(dev_board, dev_solutionFound);
+    GPUErrorAssertion(cudaGetLastError()); // Check for kernel launch errors
 
-    cudaMemcpy(&solutionFound, dev_solutionFound, sizeof(bool), cudaMemcpyDeviceToHost);
+    GPUErrorAssertion(cudaMemcpy(&solutionFound, dev_solutionFound, sizeof(bool), cudaMemcpyDeviceToHost));
 
     auto end = std::chrono::steady_clock::now(); // End time measurement
     std::chrono::duration<double> elapsed = end - start;
 
     if (solutionFound) {
         std::vector<char> solvedBoard(N * N);
-        cudaMemcpy(solvedBoard.data(), dev_board, N * N * sizeof(char), cudaMemcpyDeviceToHost);
+        GPUErrorAssertion(cudaMemcpy(solvedBoard.data(), dev_board, N * N * sizeof(char), cudaMemcpyDeviceToHost));
         printSudoku(solvedBoard);
         std::cout << "Elapsed time for GPU solving: " << elapsed.count() << " seconds" << std::endl;
     } else {
         std::cout << "No solution exists for the given Sudoku board.\n";
     }
 
-    cudaFree(dev_board);
-    cudaFree(dev_solutionFound);
+    GPUErrorAssertion(cudaFree(dev_board));
+    GPUErrorAssertion(cudaFree(dev_solutionFound));
 
     return 0;
 }
