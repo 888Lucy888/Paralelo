@@ -3,6 +3,17 @@
 #include <stdio.h>
 #include <time.h>
 
+// Define macro for handling GPU errors
+#define GPUErrorAssertion(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+
+// Inline function to handle GPU errors
+inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort = true) {
+    if (code != cudaSuccess) {
+        fprintf(stderr, "GPUassert: %s %s %d\n\n", cudaGetErrorString(code), file, line);
+        if (abort) exit(code);
+    }
+}
+
 // Function: fillSudokuSafeAndFork
 // Description: Kernel function to fill Sudoku safely and fork if necessary.
 // Parameters:
@@ -204,22 +215,21 @@ __global__ void device_validity_all(char* sudoku_memory, int* stats) {
 // - stats: Pointer to the array containing the status of each Sudoku board.
 // - max_forks: Maximum number of blocks (or Sudoku boards) to solve.
 void solveSudokuGPU(char* sudoku_memory, int* stats, int max_forks) {
-    int* cuda_stats;
     char* cuda_memory;
-    char* memory;
+    int* cuda_stats;
     cudaMalloc(&cuda_memory, 81 * max_forks);
-    cudaMalloc(&cuda_stats, (max_forks + 1) * sizeof(int));
-    memory = (char*) malloc(81 * max_forks);
-    cudaMemcpy(cuda_memory, sudoku_memory, 81 * max_forks, cudaMemcpyHostToDevice);
-    cudaMemcpy(cuda_stats, stats, (max_forks + 1) * sizeof(int), cudaMemcpyHostToDevice);
+    GPUErrorAssertion(cudaMalloc(&cuda_stats, (max_forks + 1) * sizeof(int)));
+    char* memory = (char*) malloc(81 * max_forks);
+    GPUErrorAssertion(cudaMemcpy(cuda_memory, sudoku_memory, 81 * max_forks, cudaMemcpyHostToDevice));
+    GPUErrorAssertion(cudaMemcpy(cuda_stats, stats, (max_forks + 1) * sizeof(int), cudaMemcpyHostToDevice));
     dim3 grid(1, 1, 1); // Only 1 block for this kernel
     dim3 threadsPerBlock(9, 9, 1); // 9x9 threads per block, total 81 threads
     fillSudokuSafeAndFork<<<grid, threadsPerBlock>>>(cuda_memory, cuda_stats);
-    cudaDeviceSynchronize();
-    cudaMemcpy(stats, cuda_stats, (max_forks + 1) * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(sudoku_memory, cuda_memory, 81 * max_forks, cudaMemcpyDeviceToHost);
-    cudaFree(cuda_memory);
-    cudaFree(cuda_stats);
+    GPUErrorAssertion(cudaDeviceSynchronize());
+    GPUErrorAssertion(cudaMemcpy(stats, cuda_stats, (max_forks + 1) * sizeof(int), cudaMemcpyDeviceToHost));
+    GPUErrorAssertion(cudaMemcpy(sudoku_memory, cuda_memory, 81 * max_forks, cudaMemcpyDeviceToHost));
+    GPUErrorAssertion(cudaFree(cuda_memory));
+    GPUErrorAssertion(cudaFree(cuda_stats));
     free(memory);
 }
 
