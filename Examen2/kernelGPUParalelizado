@@ -1,277 +1,257 @@
-#include <cuda.h>
-#include <stdlib.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
-#include <time.h>
+#include <stdlib.h>
+#include <string.h>
+#include <Windows.h>  // Include Windows header for Sleep function and time measurement
 
-// Define macro for handling GPU errors
-#define GPUErrorAssertion(ans) { gpuAssert((ans), __FILE__, __LINE__); }
+// Credits @SergioMEV Github
 
-// Inline function to handle GPU errors
-inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort = true) {
-    if (code != cudaSuccess) {
-        fprintf(stderr, "GPUassert: %s %s %d\n\n", cudaGetErrorString(code), file, line);
-        if (abort) exit(code);
-    }
-}
+// The width and height of a sudoku board
+#define BOARD_DIM 9
 
-// Function: fillSudokuSafeAndFork
-// Description: Kernel function to fill Sudoku safely and fork if necessary.
-// Parameters:
-// - memory: Pointer to the memory containing the Sudoku boards.
-// - stats: Pointer to the array containing the status of each Sudoku board.
-__global__ void fillSudokuSafeAndFork(char* memory, int* stats) {
-    /*
-        We have nBlocks many available blocks.
-    */
-    uint i, current_poss, j, temp, mat_i, mat_j, k;
-    char* block_memory = memory + (81 * blockIdx.x);
+// The width and height of a square group in a sudoku board
+#define GROUP_DIM 3
 
-    __shared__ uint row_used_numbers[9];
-    __shared__ uint col_used_numbers[9];
-    __shared__ uint cell_used_numbers[9];
-    __shared__ char progress_flag;
-    __shared__ char done_flag;
-    __shared__ char error_flag;
-    __shared__ int min_forks;
-    __shared__ int scheduling_thread;
+// The number of boards to pass to the solver at one time
+#define BATCH_SIZE 1  // Since we're solving only one board
 
-    // Check whether all blocks are idle or not. This shouldn't happen
-    if (blockIdx.x == 0) { //first block
-        if (threadIdx.x == 0) {
-            progress_flag = 0;
-        }
-        __syncthreads();
-        for (i = threadIdx.x; i < gridDim.x; i += blockDim.x) {
-            if (stats[i] > 0) {
-                progress_flag = 1;
-            }
-        }
-        __syncthreads();
-        if (progress_flag == 0 && threadIdx.x == 0) {
-            // No active block, terminate.
-            printf("No active blocks...terminating\n");
-            stats[gridDim.x] = 2;
-        }
-    }
+/**
+ * A board is an array of 81 cells. Each cell is encoded as a 16-bit integer.
+ */
+typedef struct board {
+    uint16_t cells[BOARD_DIM * BOARD_DIM];
+} board_t;
 
-    // If block is active, work on it
-    if (stats[blockIdx.x] == 1) {
-        if (threadIdx.x == 0) {
-            error_flag = 0;  // Set to 1 if the board is wrong
-            done_flag = 0;   // Set to 1 if the board is solved
-            progress_flag = 1; // Set to 0 if no deterministic progress can be made
-        }
-        __syncthreads();
+// Declare a few functions.
+void print_board(board_t* board);
+__host__ __device__ uint16_t digit_to_cell(int digit);
+__host__ __device__ int cell_to_digit(uint16_t cell);
 
-        while (!error_flag && !done_flag && progress_flag) {
-            __syncthreads();
-            // 1st check whether the board is valid and fill X_used_numbers arrays for rows, columns, and cells.
-            //*************************
-            if (threadIdx.x < 9) {
-                row_used_numbers[threadIdx.x] = 0;
-                col_used_numbers[threadIdx.x] = 0;
-                cell_used_numbers[threadIdx.x] = 0;
-                for (i = 0; i < 9; i++) {
-                    // Rows
-                    temp = block_memory[threadIdx.x * 9 + i];
-                    if (temp) {
-                        if ((row_used_numbers[threadIdx.x] >> (temp - 1)) & 1) {
-                            // This is bad, you have the same number in the same row. This solution fails
-                            error_flag = 10 + i;
-                        }
-                        // Set nth bit to 1
-                        row_used_numbers[threadIdx.x] |= 1 << (temp - 1);
-                    }
-                    // Columns
-                    temp = block_memory[i * 9 + threadIdx.x];
-                    if (temp) {
-                        if ((col_used_numbers[threadIdx.x] >> (temp - 1)) & 1) {
-                            // This is bad, you have the same number in the same column. This solution fails
-                            error_flag = 20 + i;
-                        }
-                        // Set nth bit to 1
-                        col_used_numbers[threadIdx.x] |= 1 << (temp - 1);
-                    }
-                }
-                // Cells
-                for (i = (threadIdx.x / 3) * 3; i < ((threadIdx.x / 3 + 1) * 3); i++) {
-                    for (j = (threadIdx.x % 3) * 3; j < ((threadIdx.x % 3 + 1) * 3); j++) {
-                        temp = block_memory[i * 9 + j];
-                        if (temp) {
-                            if ((cell_used_numbers[threadIdx.x] >> (temp - 1)) & 1) {
-                                // This is bad, you have the same number in the same cell. This solution fails
-                                error_flag = 30 + i;
-                            }
-                            // Set nth bit to 1
-                            cell_used_numbers[threadIdx.x] |= 1 << (temp - 1);
-                        }
-                    }
-                }
-            }
-            __syncthreads();
-            if (error_flag == 0) {
-                if (threadIdx.x == 0) {
-                    progress_flag = 0;
-                    done_flag = 1;
-                }
-                __syncthreads();
-                if (threadIdx.x < 81) {
-                    // 2nd for each cell, calculate available numbers (row_used OR col_used OR cell_used)
-                    if (block_memory[threadIdx.x] == 0) {
-                        mat_i = threadIdx.x / 9;
-                        mat_j = threadIdx.x % 9;
-                        current_poss = ~(row_used_numbers[mat_i] | col_used_numbers[mat_j] |
-                                         cell_used_numbers[(mat_i / 3) * 3 + (mat_j / 3)]);
-                        if (current_poss == 0) {
-                            error_flag = 40 + threadIdx.x;
-                        } else if ((current_poss & (current_poss - 1)) == 0) {
-                            // Unique solution
-                            block_memory[threadIdx.x] = (char) __ffs(current_poss);
-                        } else {
-                            // Multiple solutions
-                            if (threadIdx.x == 0) {
-                                progress_flag = 1;
-                            }
-                        }
-                    }
-                }
-            }
-            __syncthreads();
-        }
-        __syncthreads();
-    }
-    if (threadIdx.x == 0) {
-        if (error_flag) {
-            // Error detected, report it
-            printf("Error detected on block %d in phase %d!\n", blockIdx.x, error_flag);
-            stats[blockIdx.x] = 0;
-        } else if (done_flag) {
-            // Solution found, report it
-            printf("Block %d has completed successfully!\n", blockIdx.x);
-            stats[blockIdx.x] = 2;
-        } else {
-            // Block is still active, keep it running
-            stats[blockIdx.x] = 1;
-        }
-    }
-}
+/**
+ * This is the kernel to solve the sudoku boards in GPU.
+ *
+ * \param boards      An array of boards that should be solved.
+ */
+__global__ void cell_solver(board_t* boards) {
+    size_t cell_idx = threadIdx.x;
+    uint16_t current_cell;
+    size_t votes;
 
-// Function: device_validity_all
-// Description: Kernel function to check the validity of all Sudoku boards.
-// Parameters:
-// - sudoku_memory: Pointer to the memory containing the Sudoku boards.
-// - stats: Pointer to the array containing the status of each Sudoku board.
-__global__ void device_validity_all(char* sudoku_memory, int* stats) {
-    uint i, j;
-    __shared__ char validity;
-    __shared__ char error_flag;
-    if (threadIdx.x == 0) {
-        error_flag = 0;
-    }
+    // Shared memory for all the threads in the block.
+    __shared__ board_t board;
+    // Copy the contents of the board into the shared memory
+    board.cells[cell_idx] = boards[0].cells[cell_idx];  // Only one board in this case
+    // Wait for all the threads to finish copying the boards.
     __syncthreads();
-    for (i = blockIdx.x * blockDim.x + threadIdx.x; i < gridDim.x * 81; i += blockDim.x * gridDim.x) {
-        if (i % 81 == 0) {
-            validity = 0; // Reset for each new block
+
+    do {
+        current_cell = board.cells[cell_idx];
+        if (cell_to_digit(current_cell) != 0) break;
+        // Loop through the col
+        size_t col_idx = cell_idx % 9;
+        for (size_t index = col_idx; index < col_idx + 9 * 9; index += 9) {
+            if (index == cell_idx) continue;
+            int digit_result = cell_to_digit(board.cells[index]);
+            if (digit_result != 0) board.cells[cell_idx] &= ~(1 << digit_result);
         }
-        // Skip empty blocks
-        if (stats[i / 81] > 0) {
-            // Validate the current cell
-            for (j = 0; j < 9; j++) {
-                // Validate the row
-                char val = sudoku_memory[(i / 81) * 9 * 9 + j * 9 + (i % 81) % 9];
-                if (val != 0 && (validity & (1 << val))) {
-                    error_flag = 1;
-                } else {
-                    validity |= 1 << val;
-                }
-                // Validate the column
-                val = sudoku_memory[(i / 81) * 9 * 9 + (i % 81) / 9 + j * 9];
-                if (val != 0 && (validity & (1 << val))) {
-                    error_flag = 1;
-                } else {
-                    validity |= 1 << val;
-                }
-                // Validate the subsquare
-                val = sudoku_memory[(i / 81) * 9 * 9 + ((i % 81) / 9 / 3) * 27 + (j / 3) * 9 + ((i % 81) % 9 / 3) * 3 + j % 3];
-                if (val != 0 && (validity & (1 << val))) {
-                    error_flag = 1;
-                } else {
-                    validity |= 1 << val;
-                }
+        if (cell_to_digit(current_cell) != 0) break;
+        // Loop through the row
+        size_t start_idx = cell_idx - col_idx;
+        for (size_t index = start_idx; index < start_idx + 9; index++) {
+            if (index == cell_idx) continue;
+            int digit_result = cell_to_digit(board.cells[index]);
+            if (digit_result != 0) board.cells[cell_idx] &= ~(1 << digit_result);
+        }
+        if (cell_to_digit(current_cell) != 0) break;
+        // Find the index of the top left corner of the square
+        // Reduced_index is the index of cell that has the same column
+        // Index but is in the first row.
+        size_t reduced_index = cell_idx - (cell_idx / 27) * 27;
+        size_t minor_row = reduced_index / 9;
+        size_t minor_col = (reduced_index - minor_row * 9) % 3;
+        // Start_index is the index of cell at the top left corner that
+        // Share the same square of the current cell.
+        size_t start_index = cell_idx - minor_col - minor_row * 9;
+        // Loop through the square
+        for (size_t row = 0; row < 3; row++) {
+            for (size_t col = 0; col < 3; col++) {
+                size_t index = start_index + col + row * 9;
+                if (index == cell_idx) continue;
+                int digit_result = cell_to_digit(board.cells[index]);
+                if (digit_result != 0) board.cells[cell_idx] &= ~(1 << digit_result);
             }
         }
-        __syncthreads();
+        votes = __syncthreads_count(board.cells[cell_idx] != current_cell);
+
+    } while (votes != 0);
+
+    boards[0].cells[cell_idx] = board.cells[cell_idx];  // Only one board in this case
+}
+
+/**
+ * Take an array of boards and solve them all.
+ *
+ * \param boards      An array of boards that should be solved.
+ * \param num_boards  The number of boards in the boards array
+ */
+void solve_boards(board_t* cpu_boards, size_t num_boards) {
+    // allocate memory in GPU
+    board_t* gpu_boards;
+    if (cudaMalloc(&gpu_boards, sizeof(board_t) * num_boards) != cudaSuccess) {
+        perror("cuda malloc failed.");
+        exit(2);
     }
-    if (error_flag && threadIdx.x == 0) {
-        printf("Error detected in kernel device_validity_all on block %d!\n", blockIdx.x);
-        stats[gridDim.x] = 0;
+    // copy the content over to GPU
+    if (cudaMemcpy(gpu_boards, cpu_boards, sizeof(board_t) * num_boards, cudaMemcpyHostToDevice) !=
+        cudaSuccess) {
+        perror("cuda memcpy failed. ");
+        exit(2);
+    }
+
+    // Start time measurement
+    DWORD start_time = GetTickCount();
+
+    // run the kernel over BATCH_SIZE blocks and 81 threads
+    cell_solver << <1, 81 >> > (gpu_boards);  // Only one board in this case
+    // wait for all the threads to finish
+    if (cudaDeviceSynchronize() != cudaSuccess) {
+        perror("Synchronized failed.");
+        exit(2);
+    }
+
+    // End time measurement
+    DWORD end_time = GetTickCount();
+
+    // Print the time spent
+    printf("Time spent: %lu milliseconds\n", end_time - start_time);
+
+    // copy contents from GPU to CPU.
+    if (cudaMemcpy(cpu_boards, gpu_boards, sizeof(board_t) * num_boards, cudaMemcpyDeviceToHost) !=
+        cudaSuccess) {
+        perror("cuda memcpy failed. ");
+        exit(2);
     }
 }
 
-// Function: solveSudokuGPU
-// Description: Host function to solve Sudoku using GPU.
-// Parameters:
-// - sudoku_memory: Pointer to the memory containing the Sudoku boards.
-// - stats: Pointer to the array containing the status of each Sudoku board.
-// - max_forks: Maximum number of blocks (or Sudoku boards) to solve.
-void solveSudokuGPU(char* sudoku_memory, int* stats, int max_forks) {
-    char* cuda_memory;
-    int* cuda_stats;
-    cudaMalloc(&cuda_memory, 81 * max_forks);
-    GPUErrorAssertion(cudaMalloc(&cuda_stats, (max_forks + 1) * sizeof(int)));
-    char* memory = (char*) malloc(81 * max_forks);
-    GPUErrorAssertion(cudaMemcpy(cuda_memory, sudoku_memory, 81 * max_forks, cudaMemcpyHostToDevice));
-    GPUErrorAssertion(cudaMemcpy(cuda_stats, stats, (max_forks + 1) * sizeof(int), cudaMemcpyHostToDevice));
-    dim3 grid(1, 1, 1); // Only 1 block for this kernel
-    dim3 threadsPerBlock(9, 9, 1); // 9x9 threads per block, total 81 threads
-    fillSudokuSafeAndFork<<<grid, threadsPerBlock>>>(cuda_memory, cuda_stats);
-    GPUErrorAssertion(cudaDeviceSynchronize());
-    GPUErrorAssertion(cudaMemcpy(stats, cuda_stats, (max_forks + 1) * sizeof(int), cudaMemcpyDeviceToHost));
-    GPUErrorAssertion(cudaMemcpy(sudoku_memory, cuda_memory, 81 * max_forks, cudaMemcpyDeviceToHost));
-    GPUErrorAssertion(cudaFree(cuda_memory));
-    GPUErrorAssertion(cudaFree(cuda_stats));
-    free(memory);
+/**
+ * Take as input an integer value 0-9 (inclusive) and convert it to the encoded
+ * cell form used for solving the sudoku. This encoding uses bits 1-9 to
+ * indicate which values may appear in this cell.
+ *
+ * For example, if bit 3 is set to 1, then the cell may hold a three. Cells that
+ * have multiple possible values will have multiple bits set.
+ *
+ * The input digit 0 is treated specially. This value indicates a blank cell,
+ * where any value from one to nine is possible.
+ *
+ * \param digit   An integer value 0-9 inclusive
+ * \returns       The encoded form of digit using bits to indicate which values
+ *                may appear in this cell.
+ */
+__host__ __device__ uint16_t digit_to_cell(int digit) {
+    if (digit == 0) {
+        // A zero indicates a blank cell. Numbers 1-9 are possible, so set bits 1-9.
+        return 0x3FE;
+    }
+    else {
+        // Otherwise we have a fixed value. Set the corresponding bit in the board.
+        return 1 << digit;
+    }
 }
 
-// Function: printSudoku
-// Description: Function to print Sudoku grid.
-// Parameters:
-// - sudoku_memory: Pointer to the memory containing the Sudoku boards.
-void printSudoku(char* sudoku_memory) {
-    printf("Sudoku Solution:\n");
-    for (int i = 0; i < 9; i++) {
-        for (int j = 0; j < 9; j++) {
-            printf("%d ", sudoku_memory[i * 9 + j]);
+// Helper function to count trailing zeros in a 16-bit integer
+__host__ __device__ int count_trailing_zeros(uint16_t value) {
+    int count = 0;
+    while ((value & 1) == 0) {
+        value >>= 1;
+        count++;
+    }
+    return count;
+}
+
+
+/*
+ * Convert an encoded cell back to its digit form. A cell with two or more
+ * possible values will be encoded as a zero. Cells with one possible value
+ * will be converted to that value.
+ *
+ *
+ * \param cell  An encoded cell that uses bits to indicate which values could
+ *              appear at this point in the board.
+ * \returns     The value that must appear in the cell if there is only one
+ *              possibility, or zero otherwise.
+ */
+__host__ __device__ int cell_to_digit(uint16_t cell) {
+    // Get the index of the least-significant bit in this cell's value
+    int lsb = count_trailing_zeros(cell);
+
+    // Is there only one possible value for this cell? If so, return it.
+    // Otherwise return zero.
+    if (cell == 1 << lsb)
+        return lsb;
+    else
+        return 0;
+}
+
+// Function to print the Sudoku board
+void print_board(board_t* board) {
+    for (int i = 0; i < BOARD_DIM; i++) {
+        for (int j = 0; j < BOARD_DIM; j++) {
+            int digit = cell_to_digit(board->cells[i * BOARD_DIM + j]);
+            if (digit != 0) {
+                printf("%d ", digit);
+            }
+            else {
+                printf(". ");
+            }
         }
         printf("\n");
     }
 }
 
-int main() {
-    // Example Sudoku board, 0 represents empty cells
-    char sudoku_memory[81] = {
-        5, 3, 0, 0, 7, 0, 0, 0, 0,
-        6, 0, 0, 1, 9, 5, 0, 0, 0,
-        0, 9, 8, 0, 0, 0, 0, 6, 0,
-        8, 0, 0, 0, 6, 0, 0, 0, 3,
-        4, 0, 0, 8, 0, 3, 0, 0, 1,
-        7, 0, 0, 0, 2, 0, 0, 0, 6,
-        0, 6, 0, 0, 0, 0, 2, 8, 0,
-        0, 0, 0, 4, 1, 9, 0, 0, 5,
-        0, 0, 0, 0, 8, 0, 0, 7, 9
-    };
-    int stats[9];
-    int max_forks = 1; // Number of blocks (or Sudoku boards) to solve
-    clock_t start, end;
-    double cpu_time_used;
-    start = clock();
-    solveSudokuGPU(sudoku_memory, stats, max_forks);
-    end = clock();
-    cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
-    printf("Sudoku solved using GPU in %f seconds\n", cpu_time_used);
 
-    // Print Sudoku solution
-    printSudoku(sudoku_memory);
+
+/**
+ * Entry point for the program
+ */
+int main(int argc, char** argv) {
+
+    // Predefined sudoku board
+    char board[BOARD_DIM][BOARD_DIM] = {
+        {'5', '3', '.', '.', '7', '.', '.', '.', '.'},
+        {'6', '.', '.', '1', '9', '5', '.', '.', '.'},
+        {'.', '9', '8', '.', '.', '.', '.', '6', '.'},
+        {'8', '.', '.', '.', '6', '.', '.', '.', '3'},
+        {'4', '.', '.', '8', '.', '3', '.', '.', '1'},
+        {'7', '.', '.', '.', '2', '.', '.', '.', '6'},
+        {'.', '6', '.', '.', '.', '.', '2', '8', '.'},
+        {'.', '.', '.', '4', '1', '9', '.', '.', '5'},
+        {'.', '.', '.', '.', '8', '.', '.', '7', '9'}
+    };
+
+    // Initialize the sudoku board with the predefined values
+    board_t sudoku_board;
+    for (int i = 0; i < BOARD_DIM; i++) {
+        for (int j = 0; j < BOARD_DIM; j++) {
+            char current_char = board[i][j];
+            int digit;
+            if (current_char >= '1' && current_char <= '9') {
+                digit = current_char - '0';  // Convert character to integer
+            }
+            else {
+                digit = 0;  // Treat '.' as 0 (blank cell)
+            }
+            sudoku_board.cells[i * BOARD_DIM + j] = digit_to_cell(digit);
+        }
+    }
+
+
+    // Solve the sudoku board
+    solve_boards(&sudoku_board, 1);  // Only one board in this case
+
+    // Print the solved board
+    print_board(&sudoku_board);
 
     return 0;
 }
