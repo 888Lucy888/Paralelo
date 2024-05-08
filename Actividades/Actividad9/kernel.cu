@@ -4,9 +4,8 @@
 #include <time.h>
 #include <stdio.h>
 
-
 __global__ void stream_test(int* in, int* out, int size) {
-    int gid = blockDim.x + blockIdx.x + threadIdx.x;
+    int gid = blockDim.x * blockIdx.x + threadIdx.x;
     if (gid < size)
     {
         // ANY CALC
@@ -22,48 +21,71 @@ int main(int argc, char** argv)
     int byte_size = size * sizeof(int);
     int NUM_STREAMS = 10;
 
-    // Para poder hacer streams necesitamos hacer pinned memory
-    // Initiate host pointer
-    int* h_in, * h_ref, * h_in2, * h_ref2;
+    // Host pointers and streams
+    int** h_in, ** h_ref;
+    cudaStream_t* streams;
 
-    cudaMallocHost((void**)&h_in, byte_size);
-    cudaMallocHost((void**)&h_ref, byte_size);
-    cudaMallocHost((void**)&h_in2, byte_size);
-    cudaMallocHost((void**)&h_ref2, byte_size);
+    // Allocate memory for host pointers and streams
+    h_in = (int**)malloc(NUM_STREAMS * sizeof(int*));
+    h_ref = (int**)malloc(NUM_STREAMS * sizeof(int*));
+    streams = (cudaStream_t*)malloc(NUM_STREAMS * sizeof(cudaStream_t));
 
-    srand((double)time(NULL));
-    for (int i = 0; i < size; i++) {
-        h_in[i] = rand();
-        h_in2[i] = rand();
+    // Allocate host memory and create streams
+    for (int i = 0; i < NUM_STREAMS; i++) {
+        cudaMallocHost((void**)&h_in[i], byte_size);
+        cudaMallocHost((void**)&h_ref[i], byte_size);
+        cudaStreamCreate(&streams[i]);
+
+        // Initialize host input data
+        srand((unsigned int)time(NULL) + i); // Different seed for each stream
+        for (int j = 0; j < size; j++) {
+            h_in[i][j] = rand();
+        }
     }
 
-    // Allocate device pointers
-    int* d_in, * d_out, * d_in2, * d_out2;
-    cudaMalloc((void**)&d_in, byte_size);
-    cudaMalloc((void**)&d_out, byte_size);
-    cudaMalloc((void**)&d_in2, byte_size);
-    cudaMalloc((void**)&d_out2, byte_size);
+    // Device pointers
+    int** d_in, ** d_out;
 
-    // Kernel Launch
+    // Allocate memory for device pointers
+    d_in = (int**)malloc(NUM_STREAMS * sizeof(int*));
+    d_out = (int**)malloc(NUM_STREAMS * sizeof(int*));
+
+    // Allocate device memory
+    for (int i = 0; i < NUM_STREAMS; i++) {
+        cudaMalloc((void**)&d_in[i], byte_size);
+        cudaMalloc((void**)&d_out[i], byte_size);
+    }
+
+    // Kernel Launch and data transfer
     dim3 block(128);
     dim3 grid(size / block.x);
-    cudaStream_t streams[NUM_STREAMS];
 
     for (int i = 0; i < NUM_STREAMS; i++) {
-        cudaStreamCreate(&streams[i]);
+        cudaMemcpyAsync(d_in[i], h_in[i], byte_size, cudaMemcpyHostToDevice, streams[i]);
+        stream_test << <grid, block, 0, streams[i] >> > (d_in[i], d_out[i], size);
+        cudaMemcpyAsync(h_ref[i], d_out[i], byte_size, cudaMemcpyDeviceToHost, streams[i]);
     }
 
-    // Transfer data from host to device (assigning stream)
-    cudaMemcpyAsync(d_in, h_in, byte_size, cudaMemcpyHostToDevice, str);
-    // tamaño de memoria compartida, stream (__external__) __shared__
-    stream_test << <grid, block, 0, str >> > (d_in, d_out, size);
-    cudaMemcpyAsync(h_ref, d_out, byte_size, cudaMemcpyDeviceToHost, str);
+    // Synchronize streams
+    for (int i = 0; i < NUM_STREAMS; i++) {
+        cudaStreamSynchronize(streams[i]);
+    }
 
-    // Transfer data from host to device (assigning stream)
-    cudaMemcpyAsync(d_in2, h_in2, byte_size, cudaMemcpyHostToDevice, str2);
-    // tamaño de memoria compartida, stream (__external__) __shared__
-    stream_test << <grid, block, 0, str2 >> > (d_in2, d_out2, size);
-    cudaMemcpyAsync(h_ref2, d_out2, byte_size, cudaMemcpyDeviceToHost, str2);
+    // Free memory
+    for (int i = 0; i < NUM_STREAMS; i++) {
+        cudaFreeHost(h_in[i]);
+        cudaFreeHost(h_ref[i]);
+        cudaFree(d_in[i]);
+        cudaFree(d_out[i]);
+        cudaStreamDestroy(streams[i]);
+    }
+
+    // Free allocated arrays
+    free(h_in);
+    free(h_ref);
+    free(d_in);
+    free(d_out);
+    free(streams);
 
     return 0;
 }
